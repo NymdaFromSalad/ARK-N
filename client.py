@@ -5,7 +5,9 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from os import urandom
 
 # 256-bit pre-shared key (must be same on both client and server)
-PSK = b"this_is_your_32_byte_pre_shared_key!!"
+PSK = b"this_is_your_32_byte_pre_shared_"
+#print(len(PSK))
+#exit()
 
 # Replace with your actual server where you want to tunnel SOCKS data
 YOUR_SERVER_HOST = '127.0.0.1'
@@ -25,21 +27,19 @@ def recv_all(sock, n):
 
 def handle_socks_client(client_sock):
     try:
-        # 1. Handshake
+        # 1. SOCKS5 Handshake
         ver = client_sock.recv(1)
         if ver != b'\x05':
             client_sock.close()
             return
         nmethods = ord(client_sock.recv(1))
         methods = client_sock.recv(nmethods)
-        # We support no authentication only (0x00)
-        client_sock.sendall(b'\x05\x00')
+        client_sock.sendall(b'\x05\x00')  # No auth
 
-        # 2. Request
+        # 2. SOCKS5 Request
         ver_cmd_rsv_atyp = recv_all(client_sock, 4)
         ver, cmd, rsv, atyp = struct.unpack('!BBBB', ver_cmd_rsv_atyp)
-        if ver != 5 or cmd != 1:  # Only CONNECT supported
-            # Reply: command not supported
+        if ver != 5 or cmd != 1:
             client_sock.sendall(b'\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00')
             client_sock.close()
             return
@@ -52,7 +52,6 @@ def handle_socks_client(client_sock):
         elif atyp == 4:  # IPv6
             addr = socket.inet_ntop(socket.AF_INET6, recv_all(client_sock, 16))
         else:
-            # Address type not supported
             client_sock.sendall(b'\x05\x08\x00\x01\x00\x00\x00\x00\x00\x00')
             client_sock.close()
             return
@@ -60,41 +59,63 @@ def handle_socks_client(client_sock):
         port_bytes = recv_all(client_sock, 2)
         port = struct.unpack('!H', port_bytes)[0]
 
-        # print(f"SOCKS request for {addr}:{port}")
-
         # 3. Connect to your server
         server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_sock.connect((YOUR_SERVER_HOST, YOUR_SERVER_PORT))
 
-        # Send destination info in simple format: "<addr>:<port>\n"
+        # 4. Send destination + IVs to server
         dest_info = f"{addr}:{port}\n".encode()
-        server_sock.sendall(dest_info)
+        iv_c2s = urandom(12)
+        iv_s2c = urandom(12)
+        server_sock.sendall(dest_info + iv_c2s + iv_s2c)
+        # print(f"[client] IV client→server: {iv_c2s.hex()}")
+        # print(f"[client] IV server→client: {iv_s2c.hex()}")
 
-        # 4. Reply success to client
-        reply = b'\x05\x00\x00\x01'  # VER, REP=0 (success), RSV, ATYP=IPv4
-        reply += socket.inet_aton('0.0.0.0') + b'\x00\x00'  # BND.ADDR = 0.0.0.0, BND.PORT = 0
+        # 5. Reply success to local client
+        reply = b'\x05\x00\x00\x01'  # success
+        reply += socket.inet_aton('0.0.0.0') + b'\x00\x00'
         client_sock.sendall(reply)
 
-        # 5. Relay data between client_sock <-> server_sock
-        def forward(src, dst):
+        # 6. Forward encrypted and decrypted streams
+        def encrypt_forward(src, dst, iv, label):
             try:
+                aesgcm = AESGCM(PSK)
                 while True:
                     data = src.recv(4096)
                     if not data:
                         break
-                    dst.sendall(data)
+                    encrypted = aesgcm.encrypt(iv, data, None)
+                    dst.sendall(len(encrypted).to_bytes(2, 'big') + encrypted)
+                    # print(f"[{label}] Encrypted block size: {len(encrypted)}")
             except Exception as e:
-                print(f"Exception in forward: {e}")
-                pass
+                print(f"[{label}] Exception: {e}")
             finally:
                 try:
                     dst.shutdown(socket.SHUT_WR)
                 except Exception as e:
-                    print(f"Exception in forward's finally: {e}")
-                    pass
+                    print(f"[{label}] shutdown error: {e}")
 
-        t1 = threading.Thread(target=forward, args=(client_sock, server_sock))
-        t2 = threading.Thread(target=forward, args=(server_sock, client_sock))
+        def decrypt_forward(src, dst, iv, label):
+            try:
+                aesgcm = AESGCM(PSK)
+                while True:
+                    size_bytes = recv_all(src, 2)
+                    size = int.from_bytes(size_bytes, 'big')
+                    encrypted = recv_all(src, size)
+                    decrypted = aesgcm.decrypt(iv, encrypted, None)
+                    dst.sendall(decrypted)
+                    # print(f"[{label}] Decrypted block size: {len(decrypted)}")
+            except Exception as e:
+                print(f"[{label}] Exception: {e}")
+            finally:
+                try:
+                    dst.shutdown(socket.SHUT_WR)
+                except Exception as e:
+                    print(f"[{label}] shutdown error: {e}")
+
+        # Start threads for both directions
+        t1 = threading.Thread(target=encrypt_forward, args=(client_sock, server_sock, iv_c2s, "client→server"))
+        t2 = threading.Thread(target=decrypt_forward, args=(server_sock, client_sock, iv_s2c, "server→client"))
         t1.start()
         t2.start()
         t1.join()
