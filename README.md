@@ -28,3 +28,4 @@ No.
 - Add options to change encryption
 - Make code bearable to read
 - Improve server-side to use command-line arguments
+- Set up the same linting and build actions
