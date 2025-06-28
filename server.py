@@ -1,13 +1,14 @@
 # relay_server.py
 import asyncio
 from socket import gaierror
+from sys import platform
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 # from os import urandom
 
 # 256-bit pre-shared key (must be same on both client and server)
 PSK = b"this_is_your_32_byte_pre_shared_"
 
-PROXY_CHUNK_SIZE = 4096 * 16
+PROXY_CHUNK_SIZE = 1024 * 16
 CHUNK_LEN_BYTES = (PROXY_CHUNK_SIZE.bit_length() + 7) // 8  # = 3
 print(CHUNK_LEN_BYTES)
 IP = '0.0.0.0'
@@ -21,9 +22,12 @@ async def safe_read(r, n, timeout=30):
         print("Read timeout, closing connection")
         raise
     except OSError as e:
-        if e.winerror == 121:
+        if platform == 'win32' and getattr(e, 'winerror', None) == 121:
             print("Windows semaphore timeout occurred, closing connection")
             return
+        raise
+    except BrokenPipeError as e:
+        print(f"BPE in SR: {e}")
         raise
 
 
@@ -34,9 +38,12 @@ async def safe_read_exactly(r, n, timeout=30):
         print("Read timeout, closing connection")
         raise
     except OSError as e:
-        if e.winerror == 121:
+        if platform == 'win32' and getattr(e, 'winerror', None) == 121:
             print("Windows semaphore timeout occurred, closing connection")
             return
+        raise
+    except BrokenPipeError as e:
+        print(f"BPE in SRE: {e}")
         raise
 
 
@@ -89,11 +96,12 @@ async def handle_client(reader, writer):
                     w.write(decrypted)
                     await w.drain()
             except (
-                asyncio.IncompleteReadError,
-                ConnectionResetError,
-                asyncio.CancelledError
+                asyncio.IncompleteReadError, ConnectionResetError,
+                asyncio.TimeoutError, asyncio.CancelledError,
+                BrokenPipeError
             ):
-                pass
+                pass  # Pretty much always means
+                # connection closed by the other side
             finally:
                 try:
                     w.close()
@@ -118,8 +126,13 @@ async def handle_client(reader, writer):
                         + encrypted
                     )
                     await w.drain()
-            except (ConnectionResetError, asyncio.CancelledError):
-                pass
+            except (
+                asyncio.IncompleteReadError, ConnectionResetError,
+                asyncio.TimeoutError, asyncio.CancelledError,
+                BrokenPipeError
+            ):
+                pass  # Pretty much always means
+                # connection closed by the other side
             finally:
                 try:
                     w.close()
