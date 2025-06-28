@@ -2,3 +2,6 @@
 *.dist/
 *.onefile-build/
 *.exe
+*.log
+proxy_config.json
+*.zip

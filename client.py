@@ -1,20 +1,23 @@
 import asyncio
 import struct
 import socket
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+# AESGCM
 from hashlib import sha256
-from os import urandom
+from os import urandom, path as ospath, getcwd
+from json import load as jsonload, dump as jsondump
+# import sys
+from argparse import ArgumentParser
 
-# 256-bit pre-shared key (must be same on both client and server)
-KEY = "Anything"
-PSK = sha256(KEY.encode()).digest()
+KEY = None
+PSK = None
+PROXY_CHUNK_SIZE = None
+CHUNK_LEN_BYTES = None
 
-PROXY_CHUNK_SIZE = 1024 * 16
-CHUNK_LEN_BYTES = (PROXY_CHUNK_SIZE.bit_length() + 7) // 8  # = 3
-print(CHUNK_LEN_BYTES)
-# YOUR_SERVER_HOST = '127.0.0.1'
-YOUR_SERVER_HOST = '95.164.116.247'
-YOUR_SERVER_PORT = 9999
+LOCAL_HOST = None
+LOCAL_PORT = None
+REMOTE_HOST = None
+REMOTE_PORT = None
 
 
 async def recv_all(reader: asyncio.StreamReader, n: int) -> bytes:
@@ -86,7 +89,7 @@ async def handle_socks_client(
             (
                 remote_reader, remote_writer
             ) = await asyncio.open_connection(
-                YOUR_SERVER_HOST, YOUR_SERVER_PORT
+                REMOTE_HOST, REMOTE_PORT
             )
         except Exception as e:
             print("Failed to connect to relay:", e)
@@ -105,7 +108,7 @@ async def handle_socks_client(
         await writer.drain()
 
         async def encrypt_forward(src_reader, dst_writer, iv, label):
-            aesgcm = AESGCM(PSK)
+            aesgcm = ChaCha20Poly1305(PSK)
             try:
                 while True:
                     data = await src_reader.read(PROXY_CHUNK_SIZE)
@@ -128,7 +131,7 @@ async def handle_socks_client(
                 dst_writer.close()
 
         async def decrypt_forward(src_reader, dst_writer, iv, label):
-            aesgcm = AESGCM(PSK)
+            aesgcm = ChaCha20Poly1305(PSK)
             try:
                 while True:
                     size_bytes = await recv_all(src_reader, CHUNK_LEN_BYTES)
@@ -151,20 +154,143 @@ async def handle_socks_client(
             encrypt_forward(reader, remote_writer, iv_c2s, "client→server"),
             decrypt_forward(remote_reader, writer, iv_s2c, "server→client")
         )
-    except ConnectionError:  # as e:
+    except (ConnectionError, ConnectionResetError):  # as e:
         pass  # print(f"Closing connection: {e}")
     except Exception as e:
         print("Error:", e)
     finally:
-        writer.close()
-        await writer.wait_closed()
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except (ConnectionResetError, ConnectionAbortedError):
+            pass  # I fucking love errors
+
+
+CONFIG_FILENAME = "proxy_config.json"
+
+DEFAULTS = {
+    "LOCAL_HOST": "127.0.0.1",
+    "LOCAL_PORT": 1080,
+    "REMOTE_HOST": "127.0.0.1",
+    "REMOTE_PORT": 9984,
+    "KEY": "Anything",
+    "PROXY_CHUNK_SIZE": 1024 * 256
+}
+
+
+def get_default_config_path():
+    return ospath.join(getcwd(), CONFIG_FILENAME)
+
+
+def load_config_from_path(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return jsonload(f)
+
+
+def merge_config(base, override):
+    result = base.copy()
+    result.update({k: v for k, v in override.items() if v is not None})
+    return result
+
+
+def parse_args():
+    parser = ArgumentParser(
+        description=(
+            "ARK-N1 proxy, a lightweight and ",
+            "totally bug-free encrypted proxy, ",
+            "specially designed to bypass RosComNadzor's DPI"
+        )
+    )
+    parser.add_argument("-l", action="store_true",
+                        help="Load default config from cwd")
+    parser.add_argument("--load-config", action="store_true",
+                        help="Load default config from cwd")
+    parser.add_argument("--config", type=str,
+                        help="Load config from specified file path")
+    parser.add_argument("--key", type=str, help="Encryption key")
+    parser.add_argument("--local-host", type=str, help="Local listening host")
+    parser.add_argument("--local-port", type=int, help="Local listening port")
+    parser.add_argument("--remote-host", type=str, help="Remote server host")
+    parser.add_argument("--remote-port", type=int, help="Remote server port")
+    parser.add_argument("--chunk-size", type=int, help="Proxy chunk size")
+    parser.add_argument("--save-config", action="store_true",
+                        help="Save provided args to config and exit")
+    return parser.parse_args()
 
 
 async def main():
-    server = await asyncio.start_server(handle_socks_client, '127.0.0.1', 1080)
-    print("SOCKS5 proxy listening on 127.0.0.1:1080")
+    args = parse_args()
+
+    # Start with defaults
+    config = DEFAULTS.copy()
+
+    # Load config if requested
+    if args.load_config or args.l:
+        try:
+            config_path = get_default_config_path()
+            file_config = load_config_from_path(config_path)
+            config = merge_config(config, file_config)
+            print(f"Loaded config from default path: {config_path}")
+        except Exception as e:
+            print(f"Failed to load config from default path: {e}")
+
+    elif args.config:
+        try:
+            file_config = load_config_from_path(args.config)
+            config = merge_config(config, file_config)
+            print(f"Loaded config from specified path: {args.config}")
+        except Exception as e:
+            print(f"Failed to load config from specified path: {e}")
+
+    # Merge CLI args (override config)
+    cli_override = {
+        "KEY": args.key,
+        "LOCAL_HOST": args.local_host,
+        "LOCAL_PORT": args.local_port,
+        "REMOTE_HOST": args.remote_host,
+        "REMOTE_PORT": args.remote_port,
+        "PROXY_CHUNK_SIZE": args.chunk_size,
+    }
+    config = merge_config(config, cli_override)
+
+    # Save config and exit if requested
+    if args.save_config:
+        path_to_save = args.config or get_default_config_path()
+        with open(path_to_save, "w", encoding="utf-8") as f:
+            jsondump(config, f, indent=2)
+        print(f"Config saved to {path_to_save}. Exiting.")
+        return
+
+    # Calculate derived values
+    KEY = config["KEY"]
+    PSK = sha256(KEY.encode()).digest()
+    PROXY_CHUNK_SIZE = config["PROXY_CHUNK_SIZE"]
+    CHUNK_LEN_BYTES = (PROXY_CHUNK_SIZE.bit_length() + 7) // 8
+
+    LOCAL_HOST = config["LOCAL_HOST"]
+    LOCAL_PORT = config["LOCAL_PORT"]
+    REMOTE_HOST = config["REMOTE_HOST"]
+    REMOTE_PORT = config["REMOTE_PORT"]
+
+    # Update globals
+    globals().update({
+        "PSK": PSK,
+        "PROXY_CHUNK_SIZE": PROXY_CHUNK_SIZE,
+        "CHUNK_LEN_BYTES": CHUNK_LEN_BYTES,
+        "REMOTE_HOST": REMOTE_HOST,
+        "REMOTE_PORT": REMOTE_PORT
+    })
+
+    server = await asyncio.start_server(
+        handle_socks_client, LOCAL_HOST, LOCAL_PORT
+    )
+    print(f"SOCKS5 proxy listening on {LOCAL_HOST}:{LOCAL_PORT}")
+    print(f"Expecting a remote server on {REMOTE_HOST}:{REMOTE_PORT}")
     async with server:
         await server.serve_forever()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\nShutting down...")

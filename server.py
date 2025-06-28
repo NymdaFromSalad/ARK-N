@@ -2,8 +2,9 @@
 import asyncio
 from socket import gaierror
 from sys import platform
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-# , ChaCha20Poly1305
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.exceptions import InvalidTag
+# , AESGCM
 from hashlib import sha256
 # from os import urandom
 
@@ -11,11 +12,11 @@ from hashlib import sha256
 KEY = "Anything"
 PSK = sha256(KEY.encode()).digest()
 
-PROXY_CHUNK_SIZE = 1024 * 16
+PROXY_CHUNK_SIZE = 1024 * 256
 CHUNK_LEN_BYTES = (PROXY_CHUNK_SIZE.bit_length() + 7) // 8  # = 3
 print(CHUNK_LEN_BYTES)
 IP = '0.0.0.0'
-PORT = 9999
+PORT = 9984
 
 
 async def safe_read(r, n, timeout=30):
@@ -85,17 +86,17 @@ async def handle_client(reader, writer):
         # print(f"[handle_client] IV client→server: {iv_c2s.hex()}")
         # print(f"[handle_client] IV server→client: {iv_s2c.hex()}")
 
-        aesgcm_c2s = AESGCM(PSK)
-        aesgcm_s2c = AESGCM(PSK)
+        cypher_c2s = ChaCha20Poly1305(PSK)
+        cypher_s2c = ChaCha20Poly1305(PSK)
 
         # Decrypting client → server
-        async def pipe_decrypt(r, w, aesgcm, iv):
+        async def pipe_decrypt(r, w, cypher, iv):
             try:
                 while True:
                     size_bytes = await safe_read_exactly(r, CHUNK_LEN_BYTES)
                     size = int.from_bytes(size_bytes, 'big')
                     encrypted = await safe_read_exactly(r, size)
-                    decrypted = aesgcm.decrypt(iv, encrypted, None)
+                    decrypted = cypher.decrypt(iv, encrypted, None)
                     w.write(decrypted)
                     await w.drain()
             except (
@@ -105,6 +106,8 @@ async def handle_client(reader, writer):
             ):
                 pass  # Pretty much always means
                 # connection closed by the other side
+            except InvalidTag:
+                pass  # Wrong password
             finally:
                 try:
                     w.close()
@@ -117,13 +120,13 @@ async def handle_client(reader, writer):
                     print(f"Unexpected error on close: {e}")
 
         # Encrypting server → client
-        async def pipe_encrypt(r, w, aesgcm, iv):
+        async def pipe_encrypt(r, w, cypher, iv):
             try:
                 while True:
                     data = await safe_read(r, PROXY_CHUNK_SIZE)
                     if not data:
                         break
-                    encrypted = aesgcm.encrypt(iv, data, None)
+                    encrypted = cypher.encrypt(iv, data, None)
                     w.write(
                         len(encrypted).to_bytes(CHUNK_LEN_BYTES, 'big')
                         + encrypted
@@ -151,13 +154,13 @@ async def handle_client(reader, writer):
             pipe_decrypt(
                 reader,
                 remote_writer,
-                aesgcm_c2s,
+                cypher_c2s,
                 iv_c2s
             ),  # client → website
             pipe_encrypt(
                 remote_reader,
                 writer,
-                aesgcm_s2c,
+                cypher_s2c,
                 iv_s2c
             )   # website → client
         )
