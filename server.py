@@ -7,6 +7,9 @@ from os import urandom
 # 256-bit pre-shared key (must be same on both client and server)
 PSK = b"this_is_your_32_byte_pre_shared_"
 
+PROXY_CHUNK_SIZE = 4096 * 256
+CHUNK_BIT_LEN = PROXY_CHUNK_SIZE.bit_length()
+
 async def handle_client(reader, writer):
     try:
         # Step 1: Read destination line
@@ -47,7 +50,7 @@ async def handle_client(reader, writer):
         async def pipe_decrypt(r, w, aesgcm, iv):
             try:
                 while True:
-                    size_bytes = await r.readexactly(2)
+                    size_bytes = await r.readexactly(CHUNK_BIT_LEN)
                     size = int.from_bytes(size_bytes, 'big')
                     encrypted = await r.readexactly(size)
                     decrypted = aesgcm.decrypt(iv, encrypted, None)
@@ -66,11 +69,11 @@ async def handle_client(reader, writer):
         async def pipe_encrypt(r, w, aesgcm, iv):
             try:
                 while True:
-                    data = await r.read(4096)
+                    data = await r.read(PROXY_CHUNK_SIZE)
                     if not data:
                         break
                     encrypted = aesgcm.encrypt(iv, data, None)
-                    w.write(len(encrypted).to_bytes(2, 'big') + encrypted)
+                    w.write(len(encrypted).to_bytes(CHUNK_BIT_LEN, 'big') + encrypted)
                     await w.drain()
             except (ConnectionResetError, asyncio.CancelledError):
                 pass

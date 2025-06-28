@@ -6,11 +6,15 @@ from os import urandom
 
 # 256-bit pre-shared key (must be same on both client and server)
 PSK = b"this_is_your_32_byte_pre_shared_"
-#print(len(PSK))
-#exit()
+
+PROXY_CHUNK_SIZE = 4096 * 256
+CHUNK_BIT_LEN = PROXY_CHUNK_SIZE.bit_length()
+# print(len(PSK))
+# exit()
 
 # Replace with your actual server where you want to tunnel SOCKS data
 YOUR_SERVER_HOST = '127.0.0.1'
+# YOUR_SERVER_HOST = '95.164.116.247'
 YOUR_SERVER_PORT = 9999
 
 
@@ -81,11 +85,11 @@ def handle_socks_client(client_sock):
             try:
                 aesgcm = AESGCM(PSK)
                 while True:
-                    data = src.recv(4096)
+                    data = src.recv(PROXY_CHUNK_SIZE)
                     if not data:
                         break
                     encrypted = aesgcm.encrypt(iv, data, None)
-                    dst.sendall(len(encrypted).to_bytes(2, 'big') + encrypted)
+                    dst.sendall(len(encrypted).to_bytes(CHUNK_BIT_LEN, 'big') + encrypted)
                     # print(f"[{label}] Encrypted block size: {len(encrypted)}")
             except Exception as e:
                 print(f"[{label}] Exception: {e}")
@@ -99,7 +103,7 @@ def handle_socks_client(client_sock):
             try:
                 aesgcm = AESGCM(PSK)
                 while True:
-                    size_bytes = recv_all(src, 2)
+                    size_bytes = recv_all(src, CHUNK_BIT_LEN)
                     size = int.from_bytes(size_bytes, 'big')
                     encrypted = recv_all(src, size)
                     decrypted = aesgcm.decrypt(iv, encrypted, None)
