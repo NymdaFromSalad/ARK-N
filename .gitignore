@@ -1,0 +1,4 @@
+*.build/
+*.dist/
+*.onefile-build/
+*.exe
