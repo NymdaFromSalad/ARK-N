@@ -3,10 +3,13 @@ import asyncio
 from socket import gaierror
 from sys import platform
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+# , ChaCha20Poly1305
+from hashlib import sha256
 # from os import urandom
 
 # 256-bit pre-shared key (must be same on both client and server)
-PSK = b"this_is_your_32_byte_pre_shared_"
+KEY = "Anything"
+PSK = sha256(KEY.encode()).digest()
 
 PROXY_CHUNK_SIZE = 1024 * 16
 CHUNK_LEN_BYTES = (PROXY_CHUNK_SIZE.bit_length() + 7) // 8  # = 3

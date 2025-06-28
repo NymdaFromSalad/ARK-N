@@ -2,13 +2,17 @@ import asyncio
 import struct
 import socket
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from hashlib import sha256
 from os import urandom
 
-PSK = b"this_is_your_32_byte_pre_shared_"
+# 256-bit pre-shared key (must be same on both client and server)
+KEY = "Anything"
+PSK = sha256(KEY.encode()).digest()
+
 PROXY_CHUNK_SIZE = 1024 * 16
 CHUNK_LEN_BYTES = (PROXY_CHUNK_SIZE.bit_length() + 7) // 8  # = 3
 print(CHUNK_LEN_BYTES)
-#YOUR_SERVER_HOST = '127.0.0.1'
+# YOUR_SERVER_HOST = '127.0.0.1'
 YOUR_SERVER_HOST = '95.164.116.247'
 YOUR_SERVER_PORT = 9999
 
