@@ -47,7 +47,7 @@ while True:
         conn.sendall(response_headers.encode())
 
         # Send data in chunks forever
-        for _ in range(1024 * 10):
+        for _ in range(1024 * 1):
             chunk = urandom(1024 * 1024)  # 10 MB chunk
             # chunk_size = f"{len(chunk):X}\r\n".encode()
             chunk_size = f"{1024 * 1024:X}\r\n".encode()

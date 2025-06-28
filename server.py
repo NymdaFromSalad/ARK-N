@@ -2,13 +2,43 @@
 import asyncio
 from socket import gaierror
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from os import urandom
+# from os import urandom
 
 # 256-bit pre-shared key (must be same on both client and server)
 PSK = b"this_is_your_32_byte_pre_shared_"
 
-PROXY_CHUNK_SIZE = 4096 * 256
-CHUNK_BIT_LEN = PROXY_CHUNK_SIZE.bit_length()
+PROXY_CHUNK_SIZE = 4096 * 16
+CHUNK_LEN_BYTES = (PROXY_CHUNK_SIZE.bit_length() + 7) // 8  # = 3
+print(CHUNK_LEN_BYTES)
+IP = '0.0.0.0'
+PORT = 9999
+
+
+async def safe_read(r, n, timeout=30):
+    try:
+        return await asyncio.wait_for(r.read(n), timeout)
+    except asyncio.TimeoutError:
+        print("Read timeout, closing connection")
+        raise
+    except OSError as e:
+        if e.winerror == 121:
+            print("Windows semaphore timeout occurred, closing connection")
+            return
+        raise
+
+
+async def safe_read_exactly(r, n, timeout=30):
+    try:
+        return await asyncio.wait_for(r.readexactly(n), timeout)
+    except asyncio.TimeoutError:
+        print("Read timeout, closing connection")
+        raise
+    except OSError as e:
+        if e.winerror == 121:
+            print("Windows semaphore timeout occurred, closing connection")
+            return
+        raise
+
 
 async def handle_client(reader, writer):
     try:
@@ -35,7 +65,9 @@ async def handle_client(reader, writer):
             port = int(port_str)
 
         print(f"Connecting to {host}:{port}")
-        remote_reader, remote_writer = await asyncio.open_connection(host, port)
+        (
+            remote_reader, remote_writer
+        ) = await asyncio.open_connection(host, port)
 
         # Step 2: Read both IVs from client
         iv_c2s = await reader.readexactly(12)
@@ -50,30 +82,41 @@ async def handle_client(reader, writer):
         async def pipe_decrypt(r, w, aesgcm, iv):
             try:
                 while True:
-                    size_bytes = await r.readexactly(CHUNK_BIT_LEN)
+                    size_bytes = await safe_read_exactly(r, CHUNK_LEN_BYTES)
                     size = int.from_bytes(size_bytes, 'big')
-                    encrypted = await r.readexactly(size)
+                    encrypted = await safe_read_exactly(r, size)
                     decrypted = aesgcm.decrypt(iv, encrypted, None)
                     w.write(decrypted)
                     await w.drain()
-            except (asyncio.IncompleteReadError, ConnectionResetError, asyncio.CancelledError):
+            except (
+                asyncio.IncompleteReadError,
+                ConnectionResetError,
+                asyncio.CancelledError
+            ):
                 pass
             finally:
                 try:
                     w.close()
                     await w.wait_closed()
-                except:
-                    pass
+                except (ConnectionResetError, BrokenPipeError) as e:
+                    print(f"Connection error during close: {e}")
+                except asyncio.CancelledError:
+                    raise  # let it propagate
+                except Exception as e:
+                    print(f"Unexpected error on close: {e}")
 
         # Encrypting server → client
         async def pipe_encrypt(r, w, aesgcm, iv):
             try:
                 while True:
-                    data = await r.read(PROXY_CHUNK_SIZE)
+                    data = await safe_read(r, PROXY_CHUNK_SIZE)
                     if not data:
                         break
                     encrypted = aesgcm.encrypt(iv, data, None)
-                    w.write(len(encrypted).to_bytes(CHUNK_BIT_LEN, 'big') + encrypted)
+                    w.write(
+                        len(encrypted).to_bytes(CHUNK_LEN_BYTES, 'big')
+                        + encrypted
+                    )
                     await w.drain()
             except (ConnectionResetError, asyncio.CancelledError):
                 pass
@@ -81,21 +124,31 @@ async def handle_client(reader, writer):
                 try:
                     w.close()
                     await w.wait_closed()
-                except:
-                    pass
+                except (ConnectionResetError, BrokenPipeError) as e:
+                    print(f"Connection error during close: {e}")
+                except asyncio.CancelledError:
+                    raise  # let it propagate
+                except Exception as e:
+                    print(f"Unexpected error on close: {e}")
 
         await asyncio.gather(
-            pipe_decrypt(reader, remote_writer, aesgcm_c2s, iv_c2s),  # client → website
-            pipe_encrypt(remote_reader, writer, aesgcm_s2c, iv_s2c)   # website → client
+            pipe_decrypt(
+                reader,
+                remote_writer,
+                aesgcm_c2s,
+                iv_c2s
+            ),  # client → website
+            pipe_encrypt(
+                remote_reader,
+                writer,
+                aesgcm_s2c,
+                iv_s2c
+            )   # website → client
         )
 
-    except Exception as e:
+    except gaierror as e:
         print("Connection error:", e)
         writer.close()
-
-
-IP = '0.0.0.0'
-PORT = 9999
 
 
 async def main():
